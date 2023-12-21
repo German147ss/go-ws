@@ -1,68 +1,221 @@
-## Websocket from scratch
+# Servidor WebSocket en Go
 
-### 1. Run a simple web server HTTP
+## Introducción
 
+Los WebSockets son una tecnología fundamental para habilitar la comunicación bidireccional en tiempo real entre clientes y servidores. Este servidor WebSocket en Go proporciona una implementación eficiente y fácil de usar para permitir dicha comunicación persistente.
 
-### 2. Opening handshake
+## Uso Básico
+
+### Inicio del Servidor
+
+El servidor se inicia mediante el uso de un manejador HTTP que escucha en un puerto específico (en este caso, el puerto 9001). El código es sencillo y fácil de entender:
+
+```go
+package main
+
+import (
+	"log"
+	"net/http"
+)
+
+func main() {
+	http.HandleFunc("/", WsHandle)
+	log.Fatal(http.ListenAndServe(":9001", nil))
+}
 ```
-GET /chat HTTP/1.1
-Host: server.example.com
-Upgrade: websocket
-Connection: Upgrade
-Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
-Origin: http://example.com
+
+En este punto, `WsHandle` es el manejador principal que gestionará las conexiones WebSocket.
+
+### Manejo de Conexiones WebSocket
+
+La función `WsHandle` gestiona las conexiones WebSocket. Realiza el handshake inicial y establece un bucle para manejar los frames WebSocket entrantes y salientes:
+
+```go
+func WsHandle(w http.ResponseWriter, r *http.Request) {
+    // Crear una nueva conexión WebSocket
+	ws, err := New(w, r)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+    // Realizar el handshake inicial
+	err = ws.Handshake()
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+    // Asegurarse de cerrar la conexión al finalizar
+	defer ws.Close()
+
+    // Bucle para manejar frames WebSocket
+	for {
+		frame, err := ws.Recv()
+		if err != nil {
+			log.Println("Error Decoding", err)
+			return
+		}
+
+        // Procesar el frame según su opcode
+		switch frame.Opcode {
+		case 8: // Close
+			return
+		case 9: // Ping
+			frame.Opcode = 10
+			fallthrough
+		case 0, 1, 2: // Continuation, Text, Binary
+			// Procesar y enviar el frame de vuelta
+			if err = ws.Send(frame); err != nil {
+				log.Println("Error sending", err)
+				return
+			}
+		}
+	}
+}
 ```
-### 3. To manipulate the HTTP RESPONSE i use Hijacking HTTP Request
 
-### 4. Server Handshake Response
+### Estructura del Frame
+
+El servidor opera principalmente con "frames", unidades de datos en el protocolo WebSocket. La estructura `Frame` encapsula la información clave de un frame:
+
+```go
+type Frame struct {
+    IsFragment bool
+    Opcode     byte
+    Reserved   byte
+    IsMasked   bool
+    Length     uint64
+    Payload    []byte
+}
 ```
-HTTP/1.1 101 Switching Protocols
-Upgrade: websocket
-Connection: Upgrade
-Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+
+Estos frames son la base para enviar y recibir mensajes entre el cliente y el servidor.
+
+### Operaciones sobre los Frames
+
+Se proporcionan operaciones comunes sobre los frames, como obtener un frame Pong, extraer el texto del payload y verificar si es un frame de control:
+
+```go
+func (f Frame) Pong() Frame {
+    f.Opcode = 10
+    return f
+}
+
+func (f Frame) Text() string {
+    return string(f.Payload)
+}
+
+func (f *Frame) IsControl() bool {
+    return f.Opcode&0x08 == 0x08
+}
+
+func (f *Frame) HasReservedOpcode() bool {
+    return f.Opcode > 10 || (f.Opcode >= 3 && f.Opcode <= 7)
+}
+
+func (f *Frame) CloseCode() uint16 {
+    var code uint16
+    binary.Read(bytes.NewReader(f.Payload), binary.BigEndian, &code)
+    return code
+}
 ```
 
-### Frame
+Estas operaciones facilitan el manejo de diferentes tipos de frames y su interpretación.
 
-#### Validate 
-Esta función validate es responsable de validar un frame WebSocket (fr). A continuación, se detallan cada una de las validaciones que realiza:
+### Configuración del Servidor
 
-Verificación de máscara:
+El paquete `Ws` proporciona funcionalidades para el manejo de conexiones WebSocket. La creación de una nueva conexión, el handshake, la lectura y escritura de frames, y la validación se gestionan en esta estructura:
 
-Condición: !fr.IsMasked
-Acción en caso de falla: Establece el código de estado ws.status en 1002 y devuelve un error indicando un error de protocolo: "unmasked client frame". Los frames del cliente deben estar enmascarados según el protocolo WebSocket.
+```go
+type Ws struct {
+    conn   Conn
+    bufrw  *bufio.ReadWriter
+    header http.Header
+    status uint16
+}
 
-Verificación de frames de control:
+func New(w http.ResponseWriter, req *http.Request) (*Ws, error) {
+    // Crear una nueva conexión WebSocket
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		return nil, errors.New("webserver doesn't support http hijacking")
+	}
+	conn, bufrw, err := hj.Hijack()
+	if err != nil {
+		return nil, err
+	}
+	return &Ws{conn, bufrw, req.Header, 1000}, nil
+}
 
-Condición: fr.IsControl() && (fr.Length > 125 || fr.IsFragment)
-Acción en caso de falla: Establece el código de estado ws.status en 1002 y devuelve un error indicando un error de protocolo: "all control frames MUST have a payload length of 125 bytes or less and MUST NOT be fragmented". Los frames de control deben tener una longitud de carga útil de 125 bytes o menos y no deben estar fragmentados.
+func (ws *Ws) Handshake() error {
+    // Real
 
-Verificación de opcode reservado:
+izar el handshake inicial
+	hash := getAcceptHash(ws.header.Get("Sec-WebSocket-Key"))
+	lines := []string{
+		"HTTP/1.1 101 Web Socket Protocol Handshake",
+		"Server: go/echoserver",
+		"Upgrade: WebSocket",
+		"Connection: Upgrade",
+		"Sec-WebSocket-Accept: " + hash,
+		"", // required for extra CRLF
+		"", // required for extra CRLF
+	}
+	return ws.write([]byte(strings.Join(lines, "\r\n")))
+}
 
-Condición: fr.HasReservedOpcode()
-Acción en caso de falla: Establece el código de estado ws.status en 1002 y devuelve un error indicando un error de protocolo: "opcode <código de opcode> is reserved". Se detectó un código de opcode reservado según el protocolo WebSocket.
+func (ws *Ws) write(data []byte) error {
+    // Escribir datos en la conexión WebSocket
+	if _, err := ws.bufrw.Write(data); err != nil {
+		return err
+	}
+	return ws.bufrw.Flush()
+}
 
-Verificación de RSV reservado:
+func (ws *Ws) read(size int) ([]byte, error) {
+    // Leer datos de la conexión WebSocket
+	data := make([]byte, 0)
+	for {
+		if len(data) == size {
+			break
+		}
+		// Temporary slice to read chunk
+		sz := bufferSize
+		remaining := size - len(data)
+		if sz > remaining {
+			sz = remaining
+		}
+		temp := make([]byte, sz)
 
-Condición: fr.Reserved > 0
-Acción en caso de falla: Establece el código de estado ws.status en 1002 y devuelve un error indicando un error de protocolo: "RSV <valor de RSV> is reserved". Se detectó un valor de RSV (Reserved Bits) reservado según el protocolo WebSocket.
+		n, err := ws.bufrw.Read(temp)
+		if err != nil && err != io.EOF {
+			return data, err
+		}
 
-Verificación de mensaje de texto UTF-8 válido:
+		data = append(data, temp[:n]...)
+	}
+	return data, nil
+}
 
-Condición: fr.Opcode == 1 && !fr.IsFragment && !utf8.Valid(fr.Payload)
-Acción en caso de falla: Establece el código de estado ws.status en 1007 y devuelve un error indicando un error de código: "invalid UTF-8 text message". Se detectó un mensaje de texto UTF-8 no válido.
+func (ws *Ws) validate(fr *Frame) error {
+    // Validar un frame WebSocket
+    // ...
+}
 
-Verificación de código de cierre:
+func (ws *Ws) Recv() (Frame, error) {
+    // Recibir datos de la conexión WebSocket y construir un frame
+    // ...
+}
 
-Condición: fr.Opcode == 8
-Sub-condiciones:
-Condición: fr.Length >= 2
-Acción en caso de falla: Si el código de cierre es mayor o igual a 5000, o es menor que 3000 y no se encuentra en la lista de códigos de cierre predefinidos, establece el código de estado ws.status en 1002 y devuelve un error indicando un código de error específico.
-Condición: fr.Length > 2 && !reason
-Acción en caso de falla: Si la longitud del código de cierre es mayor que 2 y el motivo no es un texto UTF-8 válido, establece el código de estado ws.status en 1007 y devuelve un error indicando un código de error específico.
-Condición: fr.Length != 0
-Acción en caso de falla: Si la longitud del código de cierre no es igual a 0, establece el código de estado ws.status en 1002 y devuelve un error indicando un código de error específico.
+func (ws *Ws) Send(fr Frame) error {
+    // Enviar un frame a través de la conexión WebSocket
+    // ...
+}
 
-Si todas las validaciones pasan:
+func (ws *Ws) Close() error {
+    // Enviar un frame de cierre y cerrar la conexión TCP
+    // ...
+```
 
-Acción: Devuelve nil, indicando que no se encontraron problemas durante la validación.# go-websocket-from-scratch
+Estas operaciones son esenciales para gestionar la conexión WebSocket y garantizar la integridad de los datos intercambiados.
